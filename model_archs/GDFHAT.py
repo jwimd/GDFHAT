@@ -9,7 +9,9 @@ from basicsr.archs.arch_util import to_2tuple, trunc_normal_
 
 from einops import rearrange
 
-from restormer_arch import FeedForward
+from restormer_arch import FeedForward, GDFMFL
+
+from copy import deepcopy
 
 def drop_path(x, drop_prob: float = 0., training: bool = False):
     """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
@@ -553,7 +555,7 @@ class GDFHAB(nn.Module):
         #mlp_hidden_dim = int(dim * mlp_ratio)
         #self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
         
-        self.GDFN = FeedForward(self.dim, ffn_expansion_factor, bias=bias)
+        self.GDFN = GDFMFL(self.dim, ffn_expansion_factor, bias=bias)
 
     def forward(self, x, x_size, rpi_sa, attn_mask):
         h, w = x_size
@@ -598,15 +600,17 @@ class GDFHAB(nn.Module):
         # FFN
         x = shortcut + self.drop_path(attn_x) + conv_x * self.conv_scale
         
+        x_c = x
         #layer norm
-        self.norm2(x)
+        self.norm2(x_c)
         # reshape b h*w c -> b c h w
-        x = x.reshape(b, c, h, w)
+        x_c = x_c.reshape(b, c, h, w)
         #GDFN
-        x = self.drop_path(self.GDFN(x))
+        x_c = self.drop_path(self.GDFN(x_c))
         # reshape b c h w -> b h*w c 
-        x = x.reshape(b, h * w, c)
+        x_c = x_c.reshape(b, h * w, c)
         
+        x = x + x_c
 
         return x
 
@@ -790,7 +794,7 @@ class GDFOCAB(nn.Module):
         
         #self.proj2 = nn.Conv2d(3, dim, kernel_size=3, stride=1, padding=1, bias=bias)
         
-        self.GDFN = FeedForward(self.dim, ffn_expansion_factor, bias=bias)
+        self.GDFN = GDFMFL(self.dim, ffn_expansion_factor, bias=bias)
 
     def forward(self, x, x_size, rpi):
         h, w = x_size
@@ -837,14 +841,19 @@ class GDFOCAB(nn.Module):
 
         #x = x + self.mlp(self.norm2(x))
         
+        x_c = x
+        
         #layer norm
-        self.norm2(x)
+        self.norm2(x_c)
         # reshape b h*w c -> b c h w
-        x = x.view(b, c, h, w)
+        
+        x_c = x_c.view(b, c, h, w)
         #GDFN
-        x = self.GDFN(x)
+        x_c = self.GDFN(x_c)
         # reshape b c h w -> b h*w c 
-        x = x.view(b, h * w, c)
+        x_c = x_c.view(b, h * w, c)
+        
+        x= x+x_c
         return x
 
 class AttenBlocks(nn.Module):
@@ -1022,6 +1031,8 @@ class RTSG(nn.Module):
 
         if resi_connection == '1conv':
             self.conv = nn.Conv2d(dim, dim, 3, 1, 1)
+        elif resi_connection == 'gca':
+            self.conv = GCA(dim)
         elif resi_connection == 'identity':
             self.conv = nn.Identity()
 
@@ -1244,28 +1255,52 @@ class GDFHAT(nn.Module):
         # build RTSG
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
-            layer = RTSG(
-                dim=embed_dim,
-                input_resolution=(patches_resolution[0], patches_resolution[1]),
-                depth=depths[i_layer],
-                num_heads=num_heads[i_layer],
-                window_size=window_size,
-                compress_ratio=compress_ratio,
-                squeeze_factor=squeeze_factor,
-                conv_scale=conv_scale,
-                overlap_ratio=overlap_ratio,
-                mlp_ratio=self.mlp_ratio,
-                qkv_bias=qkv_bias,
-                qk_scale=qk_scale,
-                drop=drop_rate,
-                attn_drop=attn_drop_rate,
-                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],  # no impact on SR results
-                norm_layer=norm_layer,
-                downsample=None,
-                use_checkpoint=use_checkpoint,
-                img_size=img_size,
-                patch_size=patch_size,
-                resi_connection=resi_connection)
+            if i_layer % 6 == 5:
+                layer = RTSG(
+                    dim=embed_dim,
+                    input_resolution=(patches_resolution[0], patches_resolution[1]),
+                    depth=depths[i_layer],
+                    num_heads=num_heads[i_layer],
+                    window_size=window_size,
+                    compress_ratio=compress_ratio,
+                    squeeze_factor=squeeze_factor,
+                    conv_scale=conv_scale,
+                    overlap_ratio=overlap_ratio,
+                    mlp_ratio=self.mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    qk_scale=qk_scale,
+                    drop=drop_rate,
+                    attn_drop=attn_drop_rate,
+                    drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],  # no impact on SR results
+                    norm_layer=norm_layer,
+                    downsample=None,
+                    use_checkpoint=use_checkpoint,
+                    img_size=img_size,
+                    patch_size=patch_size,
+                    resi_connection='gca')
+            else:
+                layer = RTSG(
+                    dim=embed_dim,
+                    input_resolution=(patches_resolution[0], patches_resolution[1]),
+                    depth=depths[i_layer],
+                    num_heads=num_heads[i_layer],
+                    window_size=window_size,
+                    compress_ratio=compress_ratio,
+                    squeeze_factor=squeeze_factor,
+                    conv_scale=conv_scale,
+                    overlap_ratio=overlap_ratio,
+                    mlp_ratio=self.mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    qk_scale=qk_scale,
+                    drop=drop_rate,
+                    attn_drop=attn_drop_rate,
+                    drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],  # no impact on SR results
+                    norm_layer=norm_layer,
+                    downsample=None,
+                    use_checkpoint=use_checkpoint,
+                    img_size=img_size,
+                    patch_size=patch_size,
+                    resi_connection=resi_connection)
             self.layers.append(layer)
         self.norm = norm_layer(self.num_features)
 
@@ -1402,17 +1437,20 @@ def print_network(net):
     for param in net.parameters():
         num_params += param.numel()
     print(net)
+    
+    with open(f'net.txt', 'w') as f:
+        f.write(str(net))
     print('Total number of parameters: %f M' % (num_params / 1e6))
 
 
 if __name__ == '__main__':
-    input = torch.rand(1, 3, 128, 128).cuda()  # B C H W
-    model = GDFHAT().cuda()
+    input = torch.rand(1, 3, 128, 128)  # B C H W
+    model = GDFHAT()
     flops, params = profile(model, inputs=(input,))
     print_network(model)
     print("Param: {} M".format(params/1e6))
     print("FLOPs: {} G".format(flops/1e9))
     
-    #output = model(input)
-    #print(output.size())
+    output = model(input)
+    print(output.size())
 

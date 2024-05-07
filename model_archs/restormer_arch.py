@@ -12,6 +12,8 @@ import numbers
 from einops import rearrange
 from thop import profile
 
+from copy import deepcopy
+
 
 ##########################################################################
 ## Layer Norm
@@ -90,6 +92,75 @@ class FeedForward(nn.Module):
         x1, x2 = self.dwconv(x).chunk(2, dim=1)
         x = F.gelu(x1) * x2
         x = self.project_out(x)
+        return x
+    
+class GDFMFL(nn.Module):
+    def __init__(self, dim, ffn_expansion_factor, bias):
+        super(GDFMFL, self).__init__()
+        
+        hidden_features_g = int(dim*ffn_expansion_factor)
+        hidden_features = 180
+
+        self.project_in_g = nn.Conv2d(dim, hidden_features_g*2, kernel_size=1, bias=bias)
+        
+        self.project_in = nn.Conv2d(dim, hidden_features, kernel_size=1, bias=bias)
+        
+        self.dwconv_g = nn.Conv2d(hidden_features_g*2, hidden_features_g*2, kernel_size=3, stride=1, padding=1, groups=hidden_features_g*2, bias=bias)
+
+        self.dwconv3x3 = nn.Conv2d(hidden_features, hidden_features, kernel_size=3, stride=1, padding=1, groups=hidden_features, bias=bias)
+        self.dwconv5x5 = nn.Conv2d(hidden_features, hidden_features, kernel_size=5, stride=1, padding=2, groups=hidden_features, bias=bias)
+        self.dwconv7x7 = nn.Conv2d(hidden_features, hidden_features, kernel_size=7, stride=1, padding=3, groups=hidden_features, bias=bias)
+
+        self.relu3 = nn.ReLU()
+        self.relu5 = nn.ReLU()
+        self.relu7 = nn.ReLU()
+
+#         self.dwconv3x3_1 = nn.Conv2d(hidden_features, hidden_features, kernel_size=3, stride=1, padding=1, groups=hidden_features, bias=bias)
+#         self.dwconv5x5_1 = nn.Conv2d(hidden_features, hidden_features, kernel_size=5, stride=1, padding=2, groups=hidden_features, bias=bias)
+#         self.dwconv7x7_1 = nn.Conv2d(hidden_features, hidden_features, kernel_size=7, stride=1, padding=3, groups=hidden_features, bias=bias)
+
+
+#         self.relu3_1 = nn.ReLU()
+#         self.relu5_1 = nn.ReLU()
+#         self.relu7_1 = nn.ReLU()
+
+        self.project_out_g = nn.Conv2d(hidden_features_g * 2, dim, kernel_size=1, bias=bias)
+        self.project_out = nn.Conv2d(hidden_features * 3, dim, kernel_size=1, bias=bias)
+
+    def forward(self, x):
+        
+        # h, w = x_size
+        # b, _, c = x.shape
+        
+        x_g = x
+        #x_g  = x_g.reshape(b, c, h, w)
+        x = self.project_in(x)
+        x_g = self.project_in_g(x_g)
+        
+        x_g = self.dwconv_g(x_g)
+        
+        x1 = self.relu3(self.dwconv3x3(x))
+        x2 = self.relu5(self.dwconv5x5(x))
+        x3 = self.relu7(self.dwconv7x7(x))
+
+#         x1 = torch.cat([x1_3, x1_5, x1_7], dim=1)
+#         x2 = torch.cat([x2_3, x2_5, x2_7], dim=1)
+#         x3 = torch.cat([x3_3, x3_5, x3_7], dim=1)  #
+
+#         x1 = self.relu3_1(self.dwconv3x3_1(x1))
+#         x2 = self.relu5_1(self.dwconv5x5_1(x2))
+#         x3 = self.relu7_1(self.dwconv7x7_1(x3))
+
+        x = torch.cat([x1, x2, x3], dim=1)
+        x = self.project_out(x)
+        
+        x_g = F.gelu(x_g)
+        x_g = self.project_out_g(x_g)
+        #x_g = x_g.reshape(b, h * w, c)
+        #x_g = self.project_out_g(x_g)
+        
+        x = x_g * x
+            
         return x
 
 
